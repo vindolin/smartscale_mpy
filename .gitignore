@@ -2,3 +2,4 @@
 *.mpy
 *.romfs
 *.zip
+secrets.py

@@ -81,6 +81,12 @@ class BlueLED:
 blue_led = BlueLED()
 
 
+def de_time(time):
+    return f"{time[2]:02}.{time[1]:02}.{time[0]:04} {time[3]:02}:{time[4]:02}:{time[5]:02}"
+
+def en_time(time):
+    return f"{time[0]:04}-{time[1]:02}-{time[2]:02} {time[3]:02}:{time[4]:02}:{time[5]:02}"    
+
 async def wifi_connect():
     wlan = network.WLAN()
     wlan.active(True)
@@ -107,7 +113,7 @@ def set_ntp_time():
     try:
         ntptime.host = config.NTP_SERVER
         ntptime.settime()
-        print(f"Formatted time: {localtime_cet.localtime()}")
+        print(f"Formatted time: {de_time(localtime_cet.localtime())}")
     except:
         print("Failed to synchronize NTP time")
 
@@ -227,7 +233,7 @@ class ScaleClient:
 
         data = struct.pack('<H5B3B', year, month, day, hour, minute, second, weekday, 0, 0)
         await characteristic.write(data)
-        print("Updated scale time to:", f"{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+        print(f"Updated scale time to: {de_time(now_cet)}")
 
 
     async def query_user_measurement_history(self):
@@ -324,7 +330,7 @@ class ScaleClient:
     async def publish_latest_measurement(self, mqtt_client, measurement):
         payload = dumps(measurement)
         now_cet = localtime_cet.localtime()
-        measurement_time = f"{now_cet[0]:04}-{now_cet[1]:02}-{now_cet[2]:02} {now_cet[3]:02}:{now_cet[4]:02}:{now_cet[5]:02}"
+        measurement_time = de_time(now_cet)
         print(measurement_time)
         messages = {
             MEASUREMENT_TOPIC: payload,
@@ -355,8 +361,12 @@ class ScaleClient:
                 await progress.wait_spinner(5, blue_led.toggle, blue_led.set_off)
 
 
+abort_flag = False
+
+
 async def main():
-    gc.enable()
+    global abort_flag
+    # gc.enable()
 
     progress.hide_cursor()
 
@@ -369,14 +379,16 @@ async def main():
     set_ntp_time()
     mqtt_client.connect()
     boot_time = localtime_cet.localtime()
-    mqtt_client.publish(BOOT_TIME_TOPIC,
-                        f"{boot_time[0]:04}-{boot_time[1]:02}-{boot_time[2]:02} "
-                        +  f"{boot_time[3]:02}:{boot_time[4]:02}:{boot_time[5]:02}")
+    mqtt_client.publish(BOOT_TIME_TOPIC, en_time(boot_time))
     mqtt_client.disconnect()
     wifi_disconnect()
 
     smart_scale = ScaleClient(SCALE_DEVICE_NAME)
     while True:
+        if abort_flag:
+            print("Abort flag set, exiting main loop.")
+            break
+        
         await smart_scale.run()
         print(f"Memory: {gc.mem_alloc() / 1024} KiB")
         gc.collect()

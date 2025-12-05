@@ -54,6 +54,8 @@ BATTERY_LEVEL_TOPIC = f"{ROOT_TOPIC}/battery"
 MEASUREMENT_TOPIC = f"{ROOT_TOPIC}/measurement"
 MEASUREMENT_TIME_TOPIC = f"{ROOT_TOPIC}/measurementTime"
 MEASUREMENT_COUNT_TOPIC = f"{ROOT_TOPIC}/measurementCount"
+GC_MEMORY_TOPIC = f"{ROOT_TOPIC}/gcMemory"
+LOOP_COUNT_TOPIC = f"{ROOT_TOPIC}/loopCount"
 
 mqtt_client = umqtt.simple.MQTTClient("smartscale_client", config.MQTT_SERVER_IP, port=config.MQTT_SERVER_PORT, user=config.MQTT_SERVER_USER, password=config.MQTT_SERVER_PASSWORD)
 
@@ -75,7 +77,7 @@ class BlueLED:
         self.set(not self._state)
 
     def set_off(self):
-        self.set(False) 
+        self.set(False)
 
 
 blue_led = BlueLED()
@@ -85,20 +87,20 @@ def de_time(time):
     return f"{time[2]:02}.{time[1]:02}.{time[0]:04} {time[3]:02}:{time[4]:02}:{time[5]:02}"
 
 def en_time(time):
-    return f"{time[0]:04}-{time[1]:02}-{time[2]:02} {time[3]:02}:{time[4]:02}:{time[5]:02}"    
+    return f"{time[0]:04}-{time[1]:02}-{time[2]:02} {time[3]:02}:{time[4]:02}:{time[5]:02}"
 
 async def wifi_connect():
     wlan = network.WLAN()
     wlan.active(True)
     print("WIFI active")
-    
+
     if not wlan.isconnected():
         print("Connecting to network...")
         wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
         while not wlan.isconnected():
             await asyncio.sleep(1)
             print(".", end="")
-        
+
         print()
         print("WIFI connected:", wlan.ipconfig('addr4'))
 
@@ -108,7 +110,7 @@ def wifi_disconnect():
     wlan.active(False)
     print("WIFI disconnected")
 
-  
+
 def set_ntp_time():
     try:
         ntptime.host = config.NTP_SERVER
@@ -118,6 +120,27 @@ def set_ntp_time():
         print("Failed to synchronize NTP time")
 
 
+async def publish_messages(mqtt_client, messages):
+    for _ in range(5):
+        try:
+            await wifi_connect()
+            mqtt_client.connect()
+            print("Connected to MQTT server")
+
+            for topic, payload, retain in messages:
+                mqtt_client.publish(topic, payload, retain=retain)
+                print(f"Published to MQTT: {topic} -> {payload}")
+
+            await asyncio.sleep(2)  # give some time to send the messages before disconnecting
+            mqtt_client.disconnect()
+            print("Disconnected from MQTT server")
+            wifi_disconnect()
+            break
+        except umqtt.simple.MQTTException as e:
+            print("Failed to publish message, retrying...", e)
+            await progress.wait_spinner(2, blue_led.toggle, blue_led.set_off)
+
+
 class ScaleClient:
     def __init__(self, device_name):
         self.device_name = device_name
@@ -125,20 +148,23 @@ class ScaleClient:
         self.connection = None
         self.measurements = []
         self.latest_measurement = None
+        self.scale_time_updated = False
         print()
         print("ScaleClient initialized for device:", self.device_name)
 
     async def find_scale(self):
         print("Scanning for scale:", self.device_name)
-        blue_led.set(True)
+        blue_led.set(False)
 
         # async with aioble.scan(5000) as scanner:
         async with aioble.scan(0, interval_us=30000, window_us=30000, active=True) as scanner:
             async for result in scanner:
+                watchdog.feed()
+
                 if not result.name():
                     continue
 
-                progress.print_spinner()
+                progress.print_spinner(toggle_cb=blue_led.toggle)
 
                 if result.name() == self.device_name:
                     print()
@@ -179,7 +205,7 @@ class ScaleClient:
             await self.update_scale_time()
 
             print(f"Weighing takes about {REQUEST_DELAY_S}s to finish...")
-            await progress.show_progress_bar(REQUEST_DELAY_S, REQUEST_DELAY_S, blue_led.toggle, blue_led.set_off)
+            await progress.show_progress_bar(REQUEST_DELAY_S, REQUEST_DELAY_S, 30, blue_led.toggle, blue_led.set_off)
 
             await self.subscribe_to_measurements()  # subscribe to measurement notifications
 
@@ -188,14 +214,14 @@ class ScaleClient:
 
             print("Waiting for measurements...")
             # this is the time for the notifications to arrive
-            await progress.show_progress_bar(COLLECT_DELAY_S, COLLECT_DELAY_S, blue_led.toggle, blue_led.set_off)
+            await progress.show_progress_bar(COLLECT_DELAY_S, COLLECT_DELAY_S, 30, blue_led.toggle, blue_led.set_off)
 
             # parse received measurements
             for i, _measurement in enumerate(self.measurements):
                 measurement = self.parse_measurement(i, _measurement)
                 if not self.latest_measurement or measurement['timestamp'] > self.latest_measurement['timestamp']:
                     self.latest_measurement = measurement
-            
+
             if self.latest_measurement:
                 print("Latest measurement:", self.latest_measurement)
                 await self.publish_latest_measurement(mqtt_client, self.latest_measurement)
@@ -214,10 +240,14 @@ class ScaleClient:
         service = await self.connection.service(SVC_BATTERY)
         characteristic = await service.characteristic(CHR_BATTERY_LEVEL)
         battery_level = await characteristic.read()
-        return int.from_bytes(battery_level, 'little')   
+        return int.from_bytes(battery_level, 'little')
 
 
     async def update_scale_time(self):
+        if self.scale_time_updated:
+            print("Scale time already updated, skipping.")
+            return
+
         service = await self.connection.service(SVC_CURRENT_TIME)
         characteristic = await service.characteristic(CHR_CURRENT_TIME)
 
@@ -233,6 +263,7 @@ class ScaleClient:
 
         data = struct.pack('<H5B3B', year, month, day, hour, minute, second, weekday, 0, 0)
         await characteristic.write(data)
+        self.scale_time_updated = True
         print(f"Updated scale time to: {de_time(now_cet)}")
 
 
@@ -242,13 +273,13 @@ class ScaleClient:
         for user in USERS.values():
             request_chr = await service.characteristic(CHR_REQUEST_HISTORY)
             cmd = struct.pack('BB', MEASUREMENT_OPCODE, user['p_id'])
-            print("Requesting measurements for user", user['p_id'])            
+            print("Requesting measurements for user", user['p_id'])
             await request_chr.write(cmd)
 
 
     async def handle_measurements(self, notify_chr):
         print("Awaiting measurement notifications...")
-        
+
         while True:
             await asyncio.sleep(1)  # why do we need this delay?
 
@@ -271,27 +302,6 @@ class ScaleClient:
         asyncio.create_task(self.handle_measurements(notify_chr))
 
 
-    async def publish_messages(self, mqtt_client, messages):
-        for _ in range(5):
-            try:
-                await wifi_connect()
-                mqtt_client.connect()
-                print("Connected to MQTT server")
-
-                for topic, payload in messages.items():
-                    mqtt_client.publish(topic, payload)
-                    print(f"Published to MQTT: {topic} -> {payload}")
-                
-                await asyncio.sleep(1)  # give some time to send the messages before disconnecting
-                mqtt_client.disconnect()
-                print("Disconnected from MQTT server")
-                wifi_disconnect()
-                break
-            except umqtt.simple.MQTTException as e:
-                print("Failed to publish message, retrying...", e)
-                await progress.wait_spinner(2, blue_led.toggle, blue_led.set_off)
-
-
     def parse_measurement(self, i, data):
         p_id = data[1]
         user = USERS[p_id]
@@ -305,7 +315,7 @@ class ScaleClient:
         weight_kg = ((data[9] << 8) | data[10]) / 10.0
         imp5 = (data[11] << 8) | data[12]
         imp50 = (data[13] << 8) | data[14]
-        
+
         if imp50 > 0:
             fat_pct = calculations.calculate_fat(user, weight_kg, imp50)
             water_pct = calculations.calculate_water(user, weight_kg, imp50)
@@ -328,20 +338,19 @@ class ScaleClient:
 
 
     async def publish_latest_measurement(self, mqtt_client, measurement):
-        payload = dumps(measurement)
         now_cet = localtime_cet.localtime()
         measurement_time = de_time(now_cet)
         print(measurement_time)
-        messages = {
-            MEASUREMENT_TOPIC: payload,
-            MEASUREMENT_TIME_TOPIC: measurement_time,
-        }
-        await self.publish_messages(mqtt_client, messages)    
+        messages = (
+            (MEASUREMENT_TOPIC, dumps(measurement), True),
+            (MEASUREMENT_TIME_TOPIC, measurement_time, True),
+        )
+        await publish_messages(mqtt_client, messages)
 
 
     async def wait_for_scale_to_disappear(self):
         # wait until scale disables its BLE advertising
-        print("Waiting for scale to disable BLE advertising...")        
+        print("Waiting for scale to disable BLE advertising...")
         while True:
             found = False
             async with aioble.scan(3000, interval_us=30000, window_us=30000, active=True) as scanner:
@@ -361,37 +370,40 @@ class ScaleClient:
                 await progress.wait_spinner(5, blue_led.toggle, blue_led.set_off)
 
 
-abort_flag = False
+watchdog = machine.WDT(timeout=3 * 60 * 1000)  # 3 minutes
+loop_count = 0
 
 
 async def main():
-    global abort_flag
-    # gc.enable()
-
     progress.hide_cursor()
 
     print()
     print("*** Micropython Smart Scale Client started ***")
     print()
     print("Getting local time...")
-    
+
     await wifi_connect()
     set_ntp_time()
     mqtt_client.connect()
     boot_time = localtime_cet.localtime()
-    mqtt_client.publish(BOOT_TIME_TOPIC, en_time(boot_time))
-    mqtt_client.disconnect()
-    wifi_disconnect()
+
+    await publish_messages(mqtt_client, [
+        (BOOT_TIME_TOPIC, en_time(boot_time), True),
+    ])
 
     smart_scale = ScaleClient(SCALE_DEVICE_NAME)
     while True:
-        if abort_flag:
-            print("Abort flag set, exiting main loop.")
-            break
-        
         await smart_scale.run()
-        print(f"Memory: {gc.mem_alloc() / 1024} KiB")
+
+        print(f"Memory before GC: {gc.mem_alloc() / 1024} KiB")
         gc.collect()
-        print(f"Memory after GC: {gc.mem_alloc() / 1024} KiB")
+        mem_after_gc = gc.mem_alloc()
+        print(f"Memory after GC: {mem_after_gc / 1024} KiB")
+
+        await publish_messages(mqtt_client, [
+            (LOOP_COUNT_TOPIC, str(loop_count), True),
+            (GC_MEMORY_TOPIC, str(mem_after_gc), True),
+        ])
+        loop_count += 1
 
 # asyncio.run(main())

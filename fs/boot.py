@@ -1,6 +1,7 @@
 import machine
 import asyncio
-import smartscale
+import test
+
 
 BLUE_LED_PIN = 8
 
@@ -15,7 +16,8 @@ async def pause_before_run():
 
 def run():
     # asyncio.run(pause_before_run()) # not working :(
-    asyncio.run(smartscale.main())
+    asyncio.run(test.main())
 
+pause_before_run()
 machine.PWM(machine.Pin(BLUE_LED_PIN), freq=5000, duty_u16=65535)
-run()
+# run()

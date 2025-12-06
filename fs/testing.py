@@ -18,12 +18,11 @@ SERIAL_STARTUP_DELAY_S = 1
 
 ROOT_TOPIC = "smartscale_test"
 
-BOOT_TIME_TOPIC = f"{ROOT_TOPIC}/bootTime"
-GC_MEMORY_TOPIC = f"{ROOT_TOPIC}/gcMemory"
-BOOT_COUNT_TOPIC = f"{ROOT_TOPIC}/bootCount"
-LOOP_COUNT_TOPIC = f"{ROOT_TOPIC}/loopCount"
-LOOP_TIME_TOPIC = f"{ROOT_TOPIC}/loopTime"
-
+BOOT_TIME_TOPIC = f"{ROOT_TOPIC}/_meta/bootTime"
+GC_MEMORY_TOPIC = f"{ROOT_TOPIC}/_meta/gcMemory"
+BOOT_COUNT_TOPIC = f"{ROOT_TOPIC}/_meta/bootCount"
+LOOP_COUNT_TOPIC = f"{ROOT_TOPIC}/_meta/loopCount"
+LOOP_TIME_TOPIC = f"{ROOT_TOPIC}/_meta/loopTime"
 
 
 async def gc_collect():
@@ -83,23 +82,24 @@ async def main():
     asyncio.create_task(ble_scan())
 
     await utils.publish_messages([
-        (BOOT_COUNT_TOPIC, str(boot_count), True),
-        (BOOT_TIME_TOPIC, utils.de_time(localtime_cet.localtime()), True),
-    ])
+        (BOOT_COUNT_TOPIC, str(boot_count)),
+        (BOOT_TIME_TOPIC, utils.de_time(localtime_cet.localtime())),
+    ], retain=True)
 
     while True:
         watchdog.feed()
         mem = gc.mem_alloc()
         print(f"Used memory: {mem / 1024} KiB")
+        blue_led.toggle()
 
         uptime = uptime_ms() // 1000
         print(f"Uptime: {uptime // 3600:02}:{((uptime % 3600) // 60):02}:{uptime % 60:02}")
 
         await utils.publish_messages([
-            (LOOP_COUNT_TOPIC, str(loop_count), True),
-            (LOOP_TIME_TOPIC, utils.de_time(localtime_cet.localtime()), True),
-            (GC_MEMORY_TOPIC, str(mem), True),
-        ])
+            (LOOP_COUNT_TOPIC, str(loop_count)),
+            (LOOP_TIME_TOPIC, utils.de_time(localtime_cet.localtime())),
+            (GC_MEMORY_TOPIC, str(mem)),
+        ], retain=True)
 
         loop_count += 1
         await asyncio.sleep(3)

@@ -14,6 +14,7 @@ import umqtt.simple
 import gc
 
 import config
+import utils
 import calculations
 import progress
 import localtime_cet
@@ -26,7 +27,7 @@ USERS = OrderedDict({
 BLUE_LED_PIN = 8
 BOOT_BUTTON_PIN = 9
 
-ROOT_TOPIC = "smartscale"
+ROOT_TOPIC = "smartscaleX"
 
 SCALE_DEVICE_NAME = 'Shape100'
 
@@ -48,97 +49,17 @@ REQUEST_DELAY_S = 15
 COLLECT_DELAY_S = 5
 SERIAL_STARTUP_DELAY_S = 1
 
-BOOT_TIME_TOPIC = f"{ROOT_TOPIC}/bootTime"
-BATTERY_LEVEL_TOPIC = f"{ROOT_TOPIC}/battery"
+BOOT_COUNT_TOPIC = f"{ROOT_TOPIC}/_meta/bootCount"
+BOOT_TIME_TOPIC = f"{ROOT_TOPIC}/_meta/bootTime"
+MEASUREMENT_COUNT_TOPIC = f"{ROOT_TOPIC}/_meta/measurementCount"
+GC_MEMORY_TOPIC = f"{ROOT_TOPIC}/_meta/gcMemory"
+LOOP_COUNT_TOPIC = f"{ROOT_TOPIC}/_meta/loopCount"
 
+BATTERY_LEVEL_TOPIC = f"{ROOT_TOPIC}/battery"
 MEASUREMENT_TOPIC = f"{ROOT_TOPIC}/measurement"
 MEASUREMENT_TIME_TOPIC = f"{ROOT_TOPIC}/measurementTime"
-MEASUREMENT_COUNT_TOPIC = f"{ROOT_TOPIC}/measurementCount"
-GC_MEMORY_TOPIC = f"{ROOT_TOPIC}/gcMemory"
-LOOP_COUNT_TOPIC = f"{ROOT_TOPIC}/loopCount"
 
 mqtt_client = umqtt.simple.MQTTClient("smartscale_client", config.MQTT_SERVER_IP, port=config.MQTT_SERVER_PORT, user=config.MQTT_SERVER_USER, password=config.MQTT_SERVER_PASSWORD)
-
-
-class BlueLED:
-    def __init__(self):
-        self._freq = 5000
-        self._off_duty = 1023
-        self._on_duty = 800
-        self._led = machine.PWM(machine.Pin(BLUE_LED_PIN), freq=self._freq, duty=self._off_duty)
-        self._state = True
-        self.set(self._state)
-
-    def set(self, state):
-        self._state = state
-        self._led.duty(self._on_duty if state else self._off_duty)  # reversed
-
-    def toggle(self):
-        self.set(not self._state)
-
-    def set_off(self):
-        self.set(False)
-
-
-blue_led = BlueLED()
-
-
-def de_time(time):
-    return f"{time[2]:02}.{time[1]:02}.{time[0]:04} {time[3]:02}:{time[4]:02}:{time[5]:02}"
-
-def en_time(time):
-    return f"{time[0]:04}-{time[1]:02}-{time[2]:02} {time[3]:02}:{time[4]:02}:{time[5]:02}"
-
-async def wifi_connect():
-    wlan = network.WLAN()
-    wlan.active(True)
-    print("WIFI active")
-
-    if not wlan.isconnected():
-        print("Connecting to network...")
-        wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
-        while not wlan.isconnected():
-            await asyncio.sleep(1)
-            print(".", end="")
-
-        print()
-        print("WIFI connected:", wlan.ipconfig('addr4'))
-
-
-def wifi_disconnect():
-    wlan = network.WLAN()
-    wlan.active(False)
-    print("WIFI disconnected")
-
-
-def set_ntp_time():
-    try:
-        ntptime.host = config.NTP_SERVER
-        ntptime.settime()
-        print(f"Formatted time: {de_time(localtime_cet.localtime())}")
-    except:
-        print("Failed to synchronize NTP time")
-
-
-async def publish_messages(mqtt_client, messages):
-    for _ in range(5):
-        try:
-            await wifi_connect()
-            mqtt_client.connect()
-            print("Connected to MQTT server")
-
-            for topic, payload, retain in messages:
-                mqtt_client.publish(topic, payload, retain=retain)
-                print(f"Published to MQTT: {topic} -> {payload}")
-
-            await asyncio.sleep(2)  # give some time to send the messages before disconnecting
-            mqtt_client.disconnect()
-            print("Disconnected from MQTT server")
-            wifi_disconnect()
-            break
-        except umqtt.simple.MQTTException as e:
-            print("Failed to publish message, retrying...", e)
-            await progress.wait_spinner(2, blue_led.toggle, blue_led.set_off)
 
 
 class ScaleClient:
@@ -264,7 +185,7 @@ class ScaleClient:
         data = struct.pack('<H5B3B', year, month, day, hour, minute, second, weekday, 0, 0)
         await characteristic.write(data)
         self.scale_time_updated = True
-        print(f"Updated scale time to: {de_time(now_cet)}")
+        print(f"Updated scale time to: {utils.de_time(now_cet)}")
 
 
     async def query_user_measurement_history(self):
@@ -339,13 +260,13 @@ class ScaleClient:
 
     async def publish_latest_measurement(self, mqtt_client, measurement):
         now_cet = localtime_cet.localtime()
-        measurement_time = de_time(now_cet)
+        measurement_time = utils.de_time(now_cet)
         print(measurement_time)
         messages = (
-            (MEASUREMENT_TOPIC, dumps(measurement), True),
-            (MEASUREMENT_TIME_TOPIC, measurement_time, True),
+            (MEASUREMENT_TOPIC, dumps(measurement)),
+            (MEASUREMENT_TIME_TOPIC, measurement_time),
         )
-        await publish_messages(mqtt_client, messages)
+        await utils.publish_messages(mqtt_client, messages, retain=True)
 
 
     async def wait_for_scale_to_disappear(self):
@@ -371,10 +292,18 @@ class ScaleClient:
 
 
 watchdog = machine.WDT(timeout=3 * 60 * 1000)  # 3 minutes
-loop_count = 0
+blue_led = utils.LED(BLUE_LED_PIN)
 
 
 async def main():
+    mqtt_client = umqtt.simple.MQTTClient("smartscaleX", config.MQTT_SERVER_IP, port=config.MQTT_SERVER_PORT, user=config.MQTT_SERVER_USER, password=config.MQTT_SERVER_PASSWORD)
+    utils.init(config.WIFI_SSID, config.WIFI_PASSWORD, mqtt_client)
+
+    loop_count = 0
+    boot_count = utils.get_boot_count()
+
+    gc.enable()
+
     progress.hide_cursor()
 
     print()
@@ -382,13 +311,13 @@ async def main():
     print()
     print("Getting local time...")
 
-    await wifi_connect()
-    set_ntp_time()
+    await utils.wifi_connect()
+    utils.get_ntp_time(config.NTP_SERVER)
     mqtt_client.connect()
-    boot_time = localtime_cet.localtime()
 
-    await publish_messages(mqtt_client, [
-        (BOOT_TIME_TOPIC, en_time(boot_time), True),
+    await utils.publish_messages([
+        (BOOT_COUNT_TOPIC, str(boot_count), True),
+        (BOOT_TIME_TOPIC, utils.de_time(localtime_cet.localtime()), True),
     ])
 
     smart_scale = ScaleClient(SCALE_DEVICE_NAME)
@@ -396,11 +325,10 @@ async def main():
         await smart_scale.run()
 
         print(f"Memory before GC: {gc.mem_alloc() / 1024} KiB")
-        gc.collect()
         mem_after_gc = gc.mem_alloc()
         print(f"Memory after GC: {mem_after_gc / 1024} KiB")
 
-        await publish_messages(mqtt_client, [
+        await utils.publish_messages(mqtt_client, [
             (LOOP_COUNT_TOPIC, str(loop_count), True),
             (GC_MEMORY_TOPIC, str(mem_after_gc), True),
         ])

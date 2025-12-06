@@ -88,11 +88,18 @@ def wifi_disconnect():
     print(c.color("WIFI disconnected", c.ERROR))
 
 
-async def publish_messages(messages):
+async def publish_messages(messages, retain=False):
     for _ in range(5):
         try:
-            for topic, payload, retain in messages:
-                mqtt_client.publish(topic, payload, retain=retain)
+            for _item in messages:
+                topic, payload, _retain = None, None, None
+                if len(_item) == 2:
+                    topic, payload = _item
+                    _retain = retain
+                elif len(_item) == 3:
+                    topic, payload, _retain = _item
+
+                mqtt_client.publish(topic, payload, retain=_retain)
                 print(f"Published to MQTT: {topic} -> {payload}")
 
             await asyncio.sleep(1)  # give some time to send the messages before disconnecting

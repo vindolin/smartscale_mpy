@@ -79,6 +79,7 @@ async def main():
     mqtt_client.connect()
 
     # run the ble scan in the background
+    asyncio.create_task(ble_scan())
 
     await utils.publish_messages(mqtt_client, [
         (BOOT_COUNT_TOPIC, str(boot_count), True),

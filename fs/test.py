@@ -32,8 +32,7 @@ async def gc_collect():
     mem_after_gc = gc.mem_alloc()
     print(f"Memory after GC: {mem_after_gc / 1024} KiB")
 
-    await utils.publish_messages(mqtt_client, [
-        (LOOP_COUNT_TOPIC, str(loop_count), True),
+    await utils.publish_messages([
         (GC_MEMORY_TOPIC, str(mem_after_gc), True),
     ])
 

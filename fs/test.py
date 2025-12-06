@@ -38,7 +38,10 @@ async def gc_collect():
     ])
 
 
+
 async def ble_scan():
+    ble_devices = OrderedDict()
+
     async with aioble.scan(0, interval_us=30000, window_us=30000, active=True) as scanner:
     # async with aioble.scan(0) as scanner:
         async for result in scanner:
@@ -56,17 +59,16 @@ async def ble_scan():
                 print(c.color(f"device: {name} addr: {addr_hex}", c.INFO))
 
 
-blue_led = utils.LED(BLUE_LED_PIN)
-mqtt_client = umqtt.simple.MQTTClient("smartscale_test", config.MQTT_SERVER_IP, port=config.MQTT_SERVER_PORT, user=config.MQTT_SERVER_USER, password=config.MQTT_SERVER_PASSWORD)
-watchdog = machine.WDT(timeout=3 * 60 * 1000)  # 3 minutes
-ble_devices = OrderedDict()
-loop_count = 0
-
 async def main():
-    global loop_count
+    mqtt_client = umqtt.simple.MQTTClient("smartscale_test", config.MQTT_SERVER_IP, port=config.MQTT_SERVER_PORT, user=config.MQTT_SERVER_USER, password=config.MQTT_SERVER_PASSWORD)
     utils.init(config.WIFI_SSID, config.WIFI_PASSWORD, mqtt_client)
+
+    loop_count = 0
+    blue_led = utils.LED(BLUE_LED_PIN)
     boot_count = utils.get_boot_count()
     uptime_ms = utils.Uptime()
+    watchdog = machine.WDT(timeout=3 * 60 * 1000)  # 3 minutes
+
     gc.enable()
 
     print()
@@ -81,7 +83,7 @@ async def main():
     # run the ble scan in the background
     asyncio.create_task(ble_scan())
 
-    await utils.publish_messages(mqtt_client, [
+    await utils.publish_messages([
         (BOOT_COUNT_TOPIC, str(boot_count), True),
         (BOOT_TIME_TOPIC, utils.de_time(localtime_cet.localtime()), True),
     ])
@@ -94,7 +96,7 @@ async def main():
         uptime = uptime_ms() // 1000
         print(f"Uptime: {uptime // 3600:02}:{((uptime % 3600) // 60):02}:{uptime % 60:02}")
 
-        await utils.publish_messages(mqtt_client, [
+        await utils.publish_messages([
             (LOOP_COUNT_TOPIC, str(loop_count), True),
             (LOOP_TIME_TOPIC, utils.de_time(localtime_cet.localtime()), True),
             (GC_MEMORY_TOPIC, str(mem), True),
@@ -104,4 +106,3 @@ async def main():
         await asyncio.sleep(3)
 
 # asyncio.run(main())
-

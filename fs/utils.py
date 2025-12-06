@@ -13,7 +13,7 @@ wlan = network.WLAN()
 
 wifi_ssid = None
 wifi_password = None
-mqtt_client_global = None
+mqtt_client = None
 
 
 def init(ssid, password, mqtt_client=None):
@@ -21,8 +21,7 @@ def init(ssid, password, mqtt_client=None):
     wifi_ssid = ssid
     wifi_password = password
     if mqtt_client is not None:
-        global mqtt_client_global
-        mqtt_client_global = mqtt_client
+        globals()['mqtt_client'] = mqtt_client
 
 
 class Uptime:
@@ -89,7 +88,7 @@ def wifi_disconnect():
     print(c.color("WIFI disconnected", c.ERROR))
 
 
-async def publish_messages(mqtt_client, messages):
+async def publish_messages(messages):
     for _ in range(5):
         try:
             for topic, payload, retain in messages:
